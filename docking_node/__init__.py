@@ -10,7 +10,7 @@ from geometry_msgs.msg import Vector3
 
 arucoMarkerID = 3
 arucoIDSearcher = 0
-turnSpeed = 0.9
+turnSpeed = 0.34
 driveSpeed = 0.2
 
 arucoVisible = False
@@ -19,7 +19,7 @@ searchPeriod = 6
 newTime = True
 time_begin = time.time()
 
-targetDockingPos = [0, 0, 0.5] # given in meters
+targetDockingPos = [0, 0, 0.3] # given in meters
 targetDockingAng = [0, 0, 0] # Given in degreess
 completedDocking = [False, False, False] # [Angle rotation x-axis, x position, z position]
 
@@ -123,8 +123,6 @@ def controlDocking(minimal_publisher,img, rvecs, tvecs):
 
     w, h, __ = img.shape
 
-    # Remember to make some kind of break or cv2.input thing. It might not do things right without with ROS and stuff.
-    #if arucoPos is not targetDockkingPos and arucoAng is not targetDockingAng:
     if not completedDocking[0] or not completedDocking[1] or not completedDocking[2]:
         
         # Adjust X angle with a adjustable deadzone
@@ -135,10 +133,10 @@ def controlDocking(minimal_publisher,img, rvecs, tvecs):
             cv2.putText(img, "Angle: " + str(angleDiff), (0, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0))
             
             if angleDiff > -119 and angleDiff < 0: 
-                turnRight(minimal_publisher)
+                turnLeft(minimal_publisher)
                 completedDocking[0] = False
             elif angleDiff < 119 and angleDiff > 0:
-                turnLeft(minimal_publisher)
+                turnRight(minimal_publisher)
                 completedDocking[0] = False
             else:
                 completedDocking[0] = True
@@ -147,6 +145,8 @@ def controlDocking(minimal_publisher,img, rvecs, tvecs):
         if arucoPos[0] is not rvecs[0][0][0] and completedDocking[0]:
             distance = arucoPos[0] - targetDockingPos[0]
             
+            cv2.putText(img, "Distance X: " + str(distance), (0, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0))
+
             if distance < -0.05: 
                 driveRight(minimal_publisher)
                 completedDocking[1] = False
@@ -247,7 +247,7 @@ def main(args=None):
             if foundArucosMarkers > 0:
                 aruco.drawDetectedMarkers(img, foundArucos[0], foundArucos[1])
                 counter = 0
-                rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(foundArucos[0], 0.173, mtx, dist) # Aruco markers length are given in meters
+                rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(foundArucos[0], 0.064, mtx, dist) # Aruco markers length are given in meters
 
                 for bbox, id in zip(foundArucos[0], foundArucos[1]):
                     aruco.drawAxis(img, mtx, dist, rvecs[counter], tvecs[counter], 0.1)
