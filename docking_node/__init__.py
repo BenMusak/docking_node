@@ -8,22 +8,26 @@ from std_msgs.msg import String
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Vector3
 
-arucoMarkerID = 3
+ownMarkerID = 1
 arucoIDSearcher = 0
-turnSpeed = 0.34
-driveSpeed = 0.2
+turnSpeed = 0.2
+driveSpeed = 0.1
 
-arucoVisible = False
 directionLookLeft = False
 searchPeriod = 6
 newTime = True
 time_begin = time.time()
+startSearch = True
 
-targetDockingPos = [0, 0, 0.3] # given in meters
+targetDockingPos = [0, 0, 0.13] # given in meters
 targetDockingAng = [0, 0, 0] # Given in degreess
 completedDocking = [False, False, False] # [Angle rotation x-axis, x position, z position]
 
 class MinimalSubscriber(Node):
+
+    """ Subscribes to the docking topic and listens for the keyword to start docking. """
+
+    global completedDocking
 
     def __init__(self):
         super().__init__('minimal_subscriber')
@@ -34,17 +38,30 @@ class MinimalSubscriber(Node):
             10)
         self.subscription  # prevent unused variable warning
         self.startDocking = False
+        self.arucoMarkerID = None
 
     def listener_callback(self, msg):
         self.get_logger().info('I heard: "%s"' % msg.data)
 
-        if msg.data == "start_docking":
-            self.startDocking = True
-            print("Start Docking")
-            # ros2 topic pub /docking std_msgs/String '{data: start_docking}'
+        splitMsg = msg.data.split()
 
+        try:
+            if splitMsg[0] == "start_docking" and int(splitMsg[1]) == ownMarkerID and splitMsg[2] is not None:
+                self.startDocking = True
+                self.arucoMarkerID = int(splitMsg[2])
+                print("Start Docking")
+                # ros2 topic pub /docking std_msgs/String '{data: start_docking}'
+            elif msg.data == "stop_docking":
+                completedDocking = [False, False, False]
+                self.startDocking = False
+            else:
+                print("Something went wrong with the Aruco Marker ID.")
+        except:
+            print("Not enough parameters to unpack on topic. Are you sure u gave 3 parameters?")
 
 class MinimalPublisher(Node):
+
+    """ Publishes the angular and linear velocity to cmd_vel to control the robot. """
 
     def __init__(self):
         super().__init__('cmd_vel_publisher')
@@ -68,6 +85,9 @@ class MinimalPublisher(Node):
 
 
 def findArucosMakers(img, makerSize=6, totalMarkers=250, draw=False):
+
+    """ Finds aruco markers from a given key (markersize and totalmarkers). """
+
     imgGray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     # We use the key 6x6_250 for the Aruco markers type
     key = getattr(aruco, f'DICT_{makerSize}X{makerSize}_{totalMarkers}')
@@ -91,20 +111,28 @@ def load_coefficients(path):
     dist_matrix = cv_file.getNode("D").mat()
 
     cv_file.release()
+
     return camera_matrix, dist_matrix
 
 
 def searchForAruco(minimal_publisher):
 
-    global newTime, directionLookLeft, time_begin
+    """ Makes the robot turn left and right to look for any aruco markers. """
+
+    global newTime, directionLookLeft, time_begin, startSearch, searchPeriod
 
     if newTime:
         time_begin = time.time()
         newTime = False
+    elif startSearch:
+        searchPeriod = 3
+    elif not startSearch:
+        searchPeriod = 6
 
     if time.time() - time_begin > searchPeriod:
         # Reset clock
         newTime = True
+        startSearch = False
         directionLookLeft = np.invert(directionLookLeft)
     else:
         if directionLookLeft:
@@ -114,7 +142,9 @@ def searchForAruco(minimal_publisher):
 
 
 
-def controlDocking(minimal_publisher,img, rvecs, tvecs):
+def controlDocking(minimal_subscriber,minimal_publisher,img, rvecs, tvecs):
+
+    """ Controls the docking of the robot from the found aruco marker and its transform and rotational vectors. """
 
     global angleAdjust
 
@@ -123,60 +153,73 @@ def controlDocking(minimal_publisher,img, rvecs, tvecs):
 
     w, h, __ = img.shape
 
-    if not completedDocking[0] or not completedDocking[1] or not completedDocking[2]:
         
-        # Adjust X angle with a adjustable deadzone
-        if arucoAng[0] is not targetDockingAng[2]:
-            degrees = arucoAng[0] * (180.0/3.14159)
-            angleDiff = degrees - targetDockingAng[2]
+    # Adjust X angle with a adjustable deadzone
+    if arucoAng[1] is not targetDockingAng[2]:
+        degrees = arucoAng[1] * (180.0/3.14159)
+        angleDiff = degrees - targetDockingAng[2]
+        distanceZ = arucoPos[2] - targetDockingPos[2]
 
-            cv2.putText(img, "Angle: " + str(angleDiff), (0, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0))
-            
-            if angleDiff > -119 and angleDiff < 0: 
-                turnLeft(minimal_publisher)
-                completedDocking[0] = False
-            elif angleDiff < 119 and angleDiff > 0:
-                turnRight(minimal_publisher)
-                completedDocking[0] = False
-            else:
-                completedDocking[0] = True
+        cv2.putText(img, "Angle: " + str(angleDiff), (0, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0))
         
-        # Adjust X position with a 10 cm deadzone
-        if arucoPos[0] is not rvecs[0][0][0] and completedDocking[0]:
-            distance = arucoPos[0] - targetDockingPos[0]
-            
-            cv2.putText(img, "Distance X: " + str(distance), (0, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0))
+        # Make it so that the angeldifference decreases with the distance between the marker and robot
 
-            if distance < -0.05: 
-                driveRight(minimal_publisher)
-                completedDocking[1] = False
-            elif distance > 0.05:
-                driveLeft(minimal_publisher)
-                completedDocking[1] = False
-            else:
-                completedDocking[1] = True
+        # Precise adjustments
+        if angleDiff > -127 and angleDiff < 0 and distanceZ < 0.6: 
+            turnRight(minimal_publisher)
+            completedDocking[0] = False
+        elif angleDiff < 127 and angleDiff > 0 and distanceZ < 0.6:
+            turnLeft(minimal_publisher)
+            completedDocking[0] = False
+
+        # Prouder adjustments
+        elif angleDiff > -120 and angleDiff < 0 and distanceZ > 0.6: 
+            turnRight(minimal_publisher)
+            completedDocking[0] = False  
+        elif angleDiff < 120 and angleDiff > 0 and distanceZ > 0.6:
+            turnLeft(minimal_publisher)
+            completedDocking[0] = False
+        else:
+            completedDocking[0] = True
+
+    
+    # Adjust X position with a 10 cm deadzone
+    if arucoPos[0] is not rvecs[0][0][0] and completedDocking[0]:
+        distance = arucoPos[0] - targetDockingPos[0]
+        
+        cv2.putText(img, "Distance X: " + str(distance), (0, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0))
+
+        if distance < -0.03: 
+            driveRight(minimal_publisher)
+            completedDocking[1] = False
+        elif distance > 0.03:
+            driveLeft(minimal_publisher)
+            completedDocking[1] = False
+        else:
+            completedDocking[1] = True
 
 
-        # Finally adjust Z position with a 10 cm deadzone
-        if arucoPos[2] is not rvecs[0][0][2] and completedDocking[1] and completedDocking[0]:
-            distance = arucoPos[2] - targetDockingPos[2]
-            
-            cv2.putText(img, "Distance Z: " + str(distance), (0, 300), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0))
+    # Finally adjust Z position with a 10 cm deadzone
+    if arucoPos[2] is not rvecs[0][0][2] and completedDocking[1] and completedDocking[0]:
+        distance = arucoPos[2] - targetDockingPos[2]
+        
+        cv2.putText(img, "Distance Z: " + str(distance), (0, 300), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0))
 
-            if distance < -0.05: 
-                moveForward(minimal_publisher)
-                completedDocking[2] = False
-            elif distance > 0.05:
-                moveForward(minimal_publisher)
-                completedDocking[2] = False
-            else:
-                completedDocking[2] = True
+        if distance < -0.05: 
+            moveForward(minimal_publisher)
+            completedDocking[2] = False
+        elif distance > 0.05:
+            moveForward(minimal_publisher)
+            completedDocking[2] = False
+        else:
+            completedDocking[2] = True
 
-    elif completedDocking[0] and completedDocking[1] and completedDocking[2]:
-        startFeeder(2)
+    if completedDocking[0] and completedDocking[1] and completedDocking[2]:
+        startFeeder(img, minimal_subscriber, 2)
 
 
-def startFeeder(amount):
+def startFeeder(img, minimal_subscriber, amount):
+    #rclpy.spin_once(minimal_subscriber)
     print("Feeder Startet")
 
 
@@ -217,6 +260,8 @@ def moveForward(minimal_publisher):
 
 def main(args=None):
 
+    global arucoMarkerID
+
     # Start ROS2 node
     rclpy.init(args=args)
 
@@ -230,7 +275,7 @@ def main(args=None):
     # Load camera parameters
     mtx, dist = load_coefficients("cali.yml")
 
-    # Setup PID control in the future
+    # Setup PID control in the future maybe?
 
     while True:
 
@@ -238,7 +283,7 @@ def main(args=None):
         if not minimal_subscriber.startDocking:
             rclpy.spin_once(minimal_subscriber)
         elif minimal_subscriber.startDocking:
-            # Read image from camera
+
             __, img = cap.read()
 
             foundArucos = findArucosMakers(img)
@@ -249,25 +294,16 @@ def main(args=None):
                 counter = 0
                 rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(foundArucos[0], 0.064, mtx, dist) # Aruco markers length are given in meters
 
+                hasSeenAruco = False
                 for bbox, id in zip(foundArucos[0], foundArucos[1]):
                     aruco.drawAxis(img, mtx, dist, rvecs[counter], tvecs[counter], 0.1)
                     counter += 1
-
-                arucoVisible = True
-                arucoIDSearcher = 0
-                for i in range(len(foundArucos)):
-                    # Making sure we dont index out of bounds. I wanted to make this on one line but it dont work :C Too many if statements looks bad
-                    # arucoIDSearcher = 0 if len(foundArucos) <= 1 else arucoMarkerID = 0
-                    if len(foundArucos) <= 1:
-                        arucoIDSearcher = 0 
-                    else:
-                        arucoIDSearcher = 1
-
-                    if foundArucos[1][0] == arucoMarkerID:
-                        controlDocking(minimal_publisher, img, rvecs, tvecs)
-                    else:
-                        print("Have not found the right ID. Found ID for " + str(foundArucos[1][0]) + ", I'm looking for ID " + str(arucoMarkerID) + ".")
-
+                    
+                    if id == minimal_subscriber.arucoMarkerID:
+                        controlDocking(minimal_subscriber, minimal_publisher, img, rvecs, tvecs)
+                        hasSeenAruco = True
+                    elif id is not minimal_subscriber.arucoMarkerID and not hasSeenAruco:
+                        searchForAruco(minimal_publisher)
             else:
                 print("No Aruco markers found")
                 searchForAruco(minimal_publisher)
@@ -278,10 +314,7 @@ def main(args=None):
         else:
             continue
 
-        
-    # Destroy the node explicitly
-    # (optional - otherwise it will be done automatically
-    # when the garbage collector destroys the node object)
+
     minimal_subscriber.destroy_node()
     rclpy.shutdown()
 
