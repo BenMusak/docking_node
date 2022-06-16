@@ -1,28 +1,35 @@
-# Test
+# Import
 import rclpy
 import time
 import cv2
 import cv2.aruco as aruco
 import numpy as np
+
+# From import
 from rclpy.node import Node
 from std_msgs.msg import String
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Vector3
 
+# Tracking variables
 ownMarkerID = 1
 arucoIDSearcher = 0
-turnSpeed = 0.2
-driveSpeed = 0.1
+turnSpeed = 0
+driveSpeed = 0
 
+# Search for aruco marker variables
 directionLookLeft = False
 searchPeriod = 6
 newTime = True
 time_begin = time.time()
 startSearch = True
-
-targetDockingPos = [0, 0, 0.13] # given in meters
+targetDockingPos = [0, 0, 0.10] # given in meters
 targetDockingAng = [0, 0, 0] # Given in degreess
-completedDocking = [False, False, False] # [Angle rotation x-axis, x position, z position]
+completedDocking = False
+
+# PID variables
+integral, derivative, last_error = 0, 0, 0
+
 
 class MinimalSubscriber(Node):
 
@@ -53,12 +60,13 @@ class MinimalSubscriber(Node):
                 print("Start Docking")
                 # ros2 topic pub /docking std_msgs/String '{data: start_docking}'
             elif msg.data == "stop_docking":
-                completedDocking = [False, False, False]
+                completedDocking = False
                 self.startDocking = False
             else:
                 print("Something went wrong with the Aruco Marker ID.")
         except:
-            print("Not enough parameters to unpack on topic. Are you sure u gave 3 parameters?")
+            print("Not enough parameters to unpack on topic. Are you sure you gave 3 parameters?")
+
 
 class MinimalPublisher(Node):
 
@@ -94,7 +102,7 @@ def findArucosMakers(img, makerSize=6, totalMarkers=250, draw=False):
     key = getattr(aruco, f'DICT_{makerSize}X{makerSize}_{totalMarkers}')
     arucoDict = aruco.Dictionary_get(key)
     arucoParam = aruco.DetectorParameters_create()
-    bbox, ids, rejected = aruco.detectMarkers(imgGray, arucoDict, parameters=arucoParam)
+    bbox, ids, __ = aruco.detectMarkers(imgGray, arucoDict, parameters=arucoParam)
 
     if draw:
         aruco.drawDetectedMarkers(img, bbox)
@@ -142,88 +150,6 @@ def searchForAruco(minimal_publisher):
             turnRight(minimal_publisher)
 
 
-
-def controlDocking(minimal_subscriber,minimal_publisher,img, rvecs, tvecs):
-
-    """ Controls the docking of the robot from the found aruco marker and its transform and rotational vectors. """
-
-    global angleAdjust
-
-    arucoAng = [rvecs[0][0][0], rvecs[0][0][1], rvecs[0][0][2]]
-    arucoPos = [tvecs[0][0][0], tvecs[0][0][1], tvecs[0][0][2]]
-
-    w, h, __ = img.shape
-
-        
-    # Adjust X angle with a adjustable deadzone
-    if arucoAng[1] is not targetDockingAng[2]:
-        degrees = arucoAng[1] * (180.0/3.14159)
-        angleDiff = degrees - targetDockingAng[2]
-        distanceZ = arucoPos[2] - targetDockingPos[2]
-
-        #cv2.putText(img, "Angle: " + str(angleDiff), (0, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0))
-        
-        # Make it so that the angeldifference decreases with the distance between the marker and robot
-
-        # Precise adjustments
-        if angleDiff > -127 and angleDiff < 0 and distanceZ < 0.6: 
-            turnRight(minimal_publisher)
-            completedDocking[0] = False
-        elif angleDiff < 127 and angleDiff > 0 and distanceZ < 0.6:
-            turnLeft(minimal_publisher)
-            completedDocking[0] = False
-
-        # Prouder adjustments
-        elif angleDiff > -120 and angleDiff < 0 and distanceZ > 0.6: 
-            turnRight(minimal_publisher)
-            completedDocking[0] = False  
-        elif angleDiff < 120 and angleDiff > 0 and distanceZ > 0.6:
-            turnLeft(minimal_publisher)
-            completedDocking[0] = False
-        else:
-            completedDocking[0] = True
-
-    
-    # Adjust X position with a 10 cm deadzone
-    if arucoPos[0] is not rvecs[0][0][0] and completedDocking[0]:
-        distance = arucoPos[0] - targetDockingPos[0]
-        
-        #cv2.putText(img, "Distance X: " + str(distance), (0, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0))
-
-        if distance < -0.03: 
-            driveRight(minimal_publisher)
-            completedDocking[1] = False
-        elif distance > 0.03:
-            driveLeft(minimal_publisher)
-            completedDocking[1] = False
-        else:
-            completedDocking[1] = True
-
-
-    # Finally adjust Z position with a 10 cm deadzone
-    if arucoPos[2] is not rvecs[0][0][2] and completedDocking[1] and completedDocking[0]:
-        distance = arucoPos[2] - targetDockingPos[2]
-        
-        #cv2.putText(img, "Distance Z: " + str(distance), (0, 300), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0))
-
-        if distance < -0.05: 
-            moveForward(minimal_publisher)
-            completedDocking[2] = False
-        elif distance > 0.05:
-            moveForward(minimal_publisher)
-            completedDocking[2] = False
-        else:
-            completedDocking[2] = True
-
-    if completedDocking[0] and completedDocking[1] and completedDocking[2]:
-        startFeeder(img, minimal_subscriber, 2)
-
-
-def startFeeder(img, minimal_subscriber, amount):
-    #rclpy.spin_once(minimal_subscriber)
-    print("Feeder Startet")
-
-
 def turnRight(minimal_publisher):
     minimal_publisher.angularVec = (0.0, 0.0, -turnSpeed)
     minimal_publisher.linearVec = (0.0, 0.0, 0.0)
@@ -238,25 +164,54 @@ def turnLeft(minimal_publisher):
     print("Turning left with: " + str(turnSpeed) + "rad/s.")
 
 
-def driveRight(minimal_publisher):
-    minimal_publisher.angularVec = (0.0, 0.0, 0.0)
-    minimal_publisher.linearVec = (0.0, driveSpeed, 0.0)
-    rclpy.spin_once(minimal_publisher)
-    print("Moving right with: " + str(driveSpeed) + "m/s.")
+# PID function
+def PID(error, Kp, Ki, Kd):
+    global integral, derivative, last_error
+    integral = integral + error
+    derivative = error - last_error
+    last_error = error
+    return Kp * error + Ki * integral + Kd * derivative
 
 
-def driveLeft(minimal_publisher):
-    minimal_publisher.angularVec = (0.0, 0.0, 0.0)
-    minimal_publisher.linearVec = (0.0, -driveSpeed, 0.0)
-    rclpy.spin_once(minimal_publisher)
-    print("Moving left with: " + str(driveSpeed) + "m/s.")
+def controlDocking(minimal_publisher, rvecs, tvecs):
+
+    #https://www.google.com/search?q=how+to+use+pid+control+system+with+motor&oq=how+to+use+pid+control+system+with+motor&aqs=edge..69i57.14481j0j1&sourceid=chrome&ie=UTF-8#kpvalbx=_6MipYuTPA-2mrgT-0aSQBw36
+
+    """ Controls the docking of the robot from the found aruco marker and its transform and rotational vectors. """
+
+    global angleAdjust, turnSpeed, driveSpeed, completedDocking
+
+    arucoAng = [rvecs[0][0][0], rvecs[0][0][1], rvecs[0][0][2]]
+    arucoPos = [tvecs[0][0][0], tvecs[0][0][1], tvecs[0][0][2]]
+
+    # Adjust Z angle
+    degrees = arucoAng[1] * (180.0/3.14159)
+    angleDiff = degrees - targetDockingAng[2]
+    pid_angleDiff = PID(angleDiff, 0.5, 0.1, 0.1)
+    turnSpeedZ = pid_angleDiff
+
+    # Adjust x position
+    distanceX = arucoPos[0] - targetDockingPos[0]
+    pid_distanceX = PID(distanceX, 0.3, 0.1, 0.1)
+    driveSpeedX = pid_distanceX
+
+    # Adjust z position 
+    distanceZ = arucoPos[2] - targetDockingPos[2]
+    pid_distanceZ = PID(distanceZ, 0.3, 0.1, 0.1)
+    driveSpeedZ = pid_distanceZ
+
+    if angleDiff > targetDockingAng[2] and pid_distanceX > targetDockingPos[0] and pid_distanceZ > targetDockingPos[2] and completedDocking == False:
+        minimal_publisher.angularVec = (0.0, 0.0, -turnSpeedZ)
+        minimal_publisher.linearVec = (driveSpeedX, 0.0, driveSpeedZ)
+        rclpy.spin_once(minimal_publisher)
+    else:
+        completedDocking = True
+        print("Completed docking d8)")
+        startFeeder()
 
 
-def moveForward(minimal_publisher):
-    minimal_publisher.angularVec = (0.0, 0.0, 0.0)
-    minimal_publisher.linearVec = (driveSpeed, 0.0, 0.0)
-    rclpy.spin_once(minimal_publisher)
-    print("Moving forward with: " + str(driveSpeed) + "m/s.")
+def startFeeder():
+    print("Feeder Startet")
 
 
 def main(args=None):
@@ -276,8 +231,6 @@ def main(args=None):
     # Load camera parameters
     mtx, dist = load_coefficients("cali.yml")
 
-    # Setup PID control in the future maybe?
-
     while True:
 
         # Check if we need to dock
@@ -296,20 +249,17 @@ def main(args=None):
                 rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(foundArucos[0], 0.064, mtx, dist) # Aruco markers length are given in meters
 
                 hasSeenAruco = False
-                for bbox, id in zip(foundArucos[0], foundArucos[1]):
-                    #aruco.drawAxis(img, mtx, dist, rvecs[counter], tvecs[counter], 0.1)
+                for __, id in zip(foundArucos[0], foundArucos[1]):
                     counter += 1
-                    
                     if id == minimal_subscriber.arucoMarkerID:
-                        controlDocking(minimal_subscriber, minimal_publisher, img, rvecs, tvecs)
+                        controlDocking(minimal_publisher, rvecs, tvecs)
                         hasSeenAruco = True
                     elif id is not minimal_subscriber.arucoMarkerID and not hasSeenAruco:
                         searchForAruco(minimal_publisher)
             else:
                 print("No Aruco markers found")
                 searchForAruco(minimal_publisher)
-        
-            #cv2.imshow("Aruco Markers", img)
+
             cv2.waitKey(1)
         
         else:
